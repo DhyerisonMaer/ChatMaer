@@ -1,0 +1,139 @@
+import mysql from "mysql2/promise";
+import logger from "../lib/logger.js";
+
+interface DBConfig {
+  host: string;
+  user: string;
+  password: string;
+  database: string;
+  port?: number;
+  ssl?: mysql.SslOptions;
+  connectTimeout?: number;
+}
+
+// Fix common typo: 127.0.0.0.1 -> 127.0.0.1
+const fixHostAddress = (host: string): string => {
+  if (host === "127.0.0.0.1") {
+    return "127.0.0.1";
+  }
+  return host;
+};
+
+const config: DBConfig = {
+  host: fixHostAddress(process.env.DB_HOST || "localhost"),
+  user: process.env.DB_USER || "root",
+  password: process.env.DB_PASSWORD || "",
+  database: process.env.DB_NAME || "chat_maer",
+  port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 3306,
+  connectTimeout: process.env.DB_CONNECT_TIMEOUT
+    ? parseInt(process.env.DB_CONNECT_TIMEOUT, 10)
+    : 60000,
+};
+
+// Configure SSL for cloud MySQL databases
+const getSSLConfig = (): mysql.SslOptions | undefined => {
+  const sslMode = process.env.DB_SSL_MODE?.toLowerCase();
+
+  // If SSL is explicitly disabled, return undefined (no SSL)
+  if (sslMode === "false" || sslMode === "disabled") {
+    return undefined;
+  }
+
+  // If SSL is required (cloud databases)
+  if (sslMode === "required" || sslMode === "true" || process.env.DB_SSL_CA) {
+    const sslConfig: mysql.SslOptions = {};
+
+    // CA certificate (for cloud providers like AWS RDS, Google Cloud SQL, etc.)
+    if (process.env.DB_SSL_CA) {
+      sslConfig.ca = process.env.DB_SSL_CA;
+    }
+
+    // Client certificate and key (if required)
+    if (process.env.DB_SSL_CERT) {
+      sslConfig.cert = process.env.DB_SSL_CERT;
+    }
+    if (process.env.DB_SSL_KEY) {
+      sslConfig.key = process.env.DB_SSL_KEY;
+    }
+
+    // For DigitalOcean and other cloud providers with self-signed certificates:
+    // If no CA certificate is provided, allow self-signed certificates
+    // This is safe because the connection is still encrypted, just not verified
+    if (process.env.DB_SSL_CA) {
+      // If CA is provided, verify it (most secure)
+      sslConfig.rejectUnauthorized =
+        process.env.DB_SSL_REJECT_UNAUTHORIZED !== "false";
+    } else {
+      // If no CA provided (like DigitalOcean), allow self-signed but still use SSL
+      // Connection is still encrypted, just certificate isn't verified
+      sslConfig.rejectUnauthorized = false;
+    }
+
+    // Return SSL config
+    return sslConfig;
+  }
+
+  // For local development, SSL is optional (undefined = no SSL)
+  return undefined;
+};
+
+const sslConfig = getSSLConfig();
+if (sslConfig) {
+  config.ssl = sslConfig;
+}
+
+let pool: mysql.Pool | null = null;
+
+export const getPool = (): mysql.Pool => {
+  if (!pool) {
+    pool = mysql.createPool({
+      ...config,
+      waitForConnections: true,
+      connectionLimit: parseInt(
+        process.env.DB_CONNECTION_LIMIT || "10",
+        10,
+      ),
+      queueLimit: 0,
+      enableKeepAlive: true,
+      keepAliveInitialDelay: 0,
+    });
+  }
+  return pool;
+};
+
+export const query = async (
+  sql: string,
+  params?: unknown[],
+): Promise<unknown[]> => {
+  try {
+    const connection = await getPool();
+    const [results] = await connection.execute(sql, params || []);
+    return results as unknown[];
+  } catch (error) {
+    // Log the SQL and params for debugging (truncate long params)
+    const logParams = params?.map(p => {
+      if (typeof p === 'string' && p.length > 100) {
+        return p.substring(0, 100) + '...';
+      }
+      return p;
+    });
+    logger.error({ 
+      sql, 
+      params: logParams, 
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined
+    }, "Database query error");
+    throw error;
+  }
+};
+
+export const testConnection = async (): Promise<boolean> => {
+  try {
+    const connection = await getPool();
+    await connection.execute("SELECT 1 as test");
+    return true;
+  } catch (error) {
+    throw error;
+  }
+};
+
