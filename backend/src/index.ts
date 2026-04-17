@@ -23,6 +23,9 @@ import adminRoutes from "./routes/admin.js";
 import "./controllers/passport.js";
 
 const app = express();
+app.get("/", (req, res) => {
+  res.send("Servidor ChatMaer está online 🚀");
+});
 const httpServer = createServer(app);
 
 const allowedOrigins = [
